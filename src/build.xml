@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project basedir="." default="build">
+	<path id="build.classpath">
+		<pathelement location="classes"/>
+	</path>
+	<target name="init">
+		<mkdir dir="classes"/>
+	</target>
+	<target name="clean">
+		<delete dir="classes"/>
+	</target>
+	<target depends="init" name="build">
+		<javac srcdir="." destdir="classes" source="1.5" target="1.5" fork="yes">
+			<classpath refid="build.classpath"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/databases/UsersDatabase.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/databases/ProjectsDatabase.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/databases/ForumDatabase.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/databases/ExternDatabases.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/databases/MusicsDatabase.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/databases/Database.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/databases/SQLiteOpenHelper.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/activity/MenuActivity.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/activity/Activity.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/Censure.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/PrettyPrinter.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/Facebook.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/SoundCloud.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/NetworkSocial.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/Post.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/DiscussionGroup.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/Explorable_.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/ExplorerEntity.java"/>
+			<include name="ibeatbox_class_uml/be/umons/ibeatbox/forum/AlertMessageListener.java"/>
+			<include name="ibeatbox_class_uml/Musics.java"/>
+			<include name="ibeatbox_class_uml/LocationListener.java"/>
+			<include name="ibeatbox_class_uml/GPS.java"/>
+			<include name="ibeatbox_class_uml/Song.java"/>
+			<include name="ibeatbox_class_uml/Project.java"/>
+			<include name="ibeatbox_class_uml/ProjectInfo.java"/>
+			<include name="ibeatbox_class_uml/Profile.java"/>
+			<include name="ibeatbox_class_uml/User.java"/>
+			<include name="ibeatbox_class_uml/Application.java"/>
+			<include name="ibeatbox_class_uml/Tools.java"/>
+			<include name="ibeatbox_class_uml/RecordSound.java"/>
+			<include name="ibeatbox_class_uml/PlaySound.java"/>
+			<include name="ibeatbox_class_uml/MusicManager.java"/>
+			<include name="ibeatbox_class_uml/SoundListener.java"/>
+		</javac>
+	</target>
+</project>

@@ -1,0 +1,74 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="be.umons.ibeatbox"
+    android:versionCode="1"
+    android:versionName="1.0" >
+
+    <uses-sdk
+        android:minSdkVersion="14"
+        android:targetSdkVersion="16" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <!-- RECORD_AUDIO is needed to create an audio recorder -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"></uses-permission>
+
+    <!-- MODIFY_AUDIO_SETTINGS is needed to use audio effects such as environmental reverb -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"></uses-permission>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"></uses-permission>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" ></uses-permission>
+    <uses-permission android:name="android.permission.READ_PHONE_STATE"></uses-permission>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/AppTheme" 
+        android:name=".main.Tools"
+        >
+         <activity
+            android:name=".activity.MenuActivity"
+            android:label="@string/app_name"
+            android:screenOrientation="portrait" >
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".activity.MusicManagerActivity"
+            android:label="@string/music"
+            android:screenOrientation="portrait" ></activity>
+        <activity android:name=".activity.ForumActivity"
+            android:label="@string/IB"
+            android:screenOrientation="portrait" ></activity>
+        <activity android:name=".activity.RecordMusicActivity"
+            android:label="@string/record"
+            android:screenOrientation="portrait" ></activity>
+        <activity android:name=".activity.SoundRecordActivity"
+            android:label="@string/record"
+            android:screenOrientation="portrait" ></activity>
+        <activity android:name=".activity.ListRecordersActivity"
+            android:label="@string/record"
+            android:screenOrientation="portrait" ></activity>
+         <activity android:name=".activity.ListPlayActivity"
+            android:label="@string/play"
+            android:screenOrientation="portrait" ></activity>
+         <activity android:name=".activity.SettingActivity"
+            android:label="@string/play"
+            android:screenOrientation="portrait" ></activity>
+         <activity android:name=".activity.PlayActivity"
+            android:label="@string/play"
+            android:screenOrientation="portrait" ></activity>
+         <activity android:name=".activity.LoopActivity"
+            android:label="@string/loop"
+            android:screenOrientation="portrait" ></activity>
+         <activity android:name=".activity.ChatActivity"
+            android:label="@string/IB"
+            android:screenOrientation="portrait" ></activity>
+         <activity android:name=".activity.LoopCheckboxChooseActivity"
+            android:label="DL sound"
+            android:screenOrientation="portrait" ></activity>
+    </application>
+</manifest>
