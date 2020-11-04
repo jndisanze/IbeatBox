@@ -1,0 +1,22 @@
+/home/ndisanze/workspace/IBeatBox/jni/native-audio-jni.cpp:139:14: warning: 'record_play_realtime' defined but not used [-Wunused-variable]
+/home/ndisanze/workspace/IBeatBox/jni/native-audio-jni.cpp:146:14: warning: 'countSound' defined but not used [-Wunused-variable]
+/home/ndisanze/workspace/IBeatBox/jni/native-audio-jni.cpp:147:14: warning: 'COUNTLOOPSOUND' defined but not used [-Wunused-variable]
+/home/ndisanze/workspace/IBeatBox/jni/native-audio-jni.cpp:148:14: warning: 'COUNTLOOPSOUNDVOICE' defined but not used [-Wunused-variable]
+/home/ndisanze/workspace/IBeatBox/jni/native-audio-jni.cpp:177:14: warning: 'cancel_sound' defined but not used [-Wunused-variable]
+/home/ndisanze/workspace/IBeatBox/jni/native-audio-jni.cpp:179:15: warning: 'LOOP_IS_PLAYING' defined but not used [-Wunused-variable]
+/home/ndisanze/workspace/IBeatBox/jni/native-audio-jni.cpp:184:14: warning: 'STATE_REPEAT' defined but not used [-Wunused-variable]
+
+ /**register stk::StkFloat *samples = (stk::StkFloat *) outputBuffer;
+  
+  for ( unsigned int i=0; i<nBufferFrames; i++ ) {
+    *samples++ = tickData->getInstrument()->tick();
+    LOGI("mi tic");
+    if ( ++tickData->counter % 2000 == 0 ) {
+      data->scaler += 0.025;
+      data->instrument->setFrequency( data->frequency * data->scaler );
+    }
+  }
+
+  if ( data.counter > 80000 )
+    data.done = true;
+   }*/

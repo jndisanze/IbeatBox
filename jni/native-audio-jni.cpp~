@@ -1,0 +1,1528 @@
+/*
+ * Copyright (C) 2010 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+/* This is a JNI example where we use native methods to play sounds
+ * using OpenSL ES. See the corresponding Java source file located at:
+ *
+ */
+
+#include <assert.h>
+#include <jni.h>
+#include <string.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include<iostream>
+#include <cstring>
+#include<fstream>
+#include <string>
+#include <sstream>
+#include <cstdlib>
+#include <sys/stat.h>
+#include <map>
+#include <sqlite3.h>
+#include "mysqlite.h"
+#include <vector>
+using namespace std;
+#include <android/log.h>
+
+#ifndef LOG_TAG
+#define LOG_TAG "JP LOG:"
+#endif
+
+#define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__))
+
+// for native audio
+#include <SLES/OpenSLES.h>
+#include <SLES/OpenSLES_Android.h>
+
+// for native asset manager
+#include <sys/types.h>
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+
+//semaphore
+#include <semaphore.h>
+// pre-recorded sound clips, both are 8 kHz mono 16-bit signed little endian
+#define MAX_NUMBER_INTERFACES 5
+#define MAX_NUMBER_INPUT_DEVICES 3
+#define POSITION_UPDATE_PERIOD 1000 /* 1 sec */
+
+
+static const char hello[] =
+#include "hello_clip.h"
+;
+
+static const char android[] =
+#include "android_clip.h"
+;
+int myValue = 0;
+// engine interfaces
+static SLObjectItf engineObject = NULL;
+static SLEngineItf engineEngine;
+
+// output mix interfaces
+static SLObjectItf outputMixObject = NULL;
+static SLEnvironmentalReverbItf outputMixEnvironmentalReverb = NULL;
+
+// buffer queue player interfaces
+static SLObjectItf bqPlayerObject = NULL;
+static SLPlayItf bqPlayerPlay;
+static SLAndroidSimpleBufferQueueItf bqPlayerBufferQueue;
+static SLEffectSendItf bqPlayerEffectSend;
+static SLMuteSoloItf bqPlayerMuteSolo;
+static SLVolumeItf bqPlayerVolume;
+
+// aux effect on the output mix, used by the buffer queue player
+static const SLEnvironmentalReverbSettings reverbSettings =
+    SL_I3DL2_ENVIRONMENT_PRESET_STONECORRIDOR;
+
+// URI player interfaces
+static SLObjectItf uriPlayerObject = NULL;
+static SLPlayItf uriPlayerPlay;
+static SLSeekItf uriPlayerSeek;
+static SLMuteSoloItf uriPlayerMuteSolo;
+static SLVolumeItf uriPlayerVolume;
+
+// file descriptor player interfaces
+static SLObjectItf fdPlayerObject = NULL;
+static SLPlayItf fdPlayerPlay;
+static SLSeekItf fdPlayerSeek;
+static SLMuteSoloItf fdPlayerMuteSolo;
+static SLVolumeItf fdPlayerVolume;
+
+// recorder interfaces
+static SLObjectItf recorderObject = NULL;
+static SLRecordItf recorderRecord;
+static SLAndroidSimpleBufferQueueItf recorderBufferQueue;
+
+// synthesized sawtooth clip
+#define SAWTOOTH_FRAMES 8000
+static short sawtoothBuffer[SAWTOOTH_FRAMES];
+
+// 10 seconds of recorded audio at 16 kHz mono, 16-bit signed little endian
+static int minute = 10; 
+#define RECORDER_FRAMES (128)
+#define TOTAL_RECORDER_FRAMES (8000*10)
+static short recorderBuffer1[RECORDER_FRAMES];
+static short recorderBuffer2[RECORDER_FRAMES];
+static short recorderBuffer3[RECORDER_FRAMES];
+static short t[RECORDER_FRAMES];
+static short dataCopy[RECORDER_FRAMES];
+static short recorderBuffer_TOTAL[TOTAL_RECORDER_FRAMES];
+static unsigned recorderSize = 0;
+static unsigned bufferNumber = 3;
+static unsigned countBufferCurrent=0;
+static short *recorderbufferCurrent = 0;
+static short * recorderbufferCurrent_audioProcessing=0;
+static SLmilliHertz recorderSR;
+static int record_play_realtime = 0;
+const static int size = 5000;
+static int countPlayer;
+static short metroBufferHight[RECORDER_FRAMES];
+static short metroBufferLow[RECORDER_FRAMES];
+static short metroBufferNull[RECORDER_FRAMES];
+static short mixBuffer[RECORDER_FRAMES];
+static int IS_REALTIME = 3;
+static int IS_LOOPING = 4;
+static int countSound=0;
+static int COUNTLOOPSOUND =0;
+static int COUNTLOOPSOUNDVOICE =0;
+//static short recordSound = new short[RECORDER_FRAMES][250];
+
+//semaphore
+sem_t mutex;
+
+// signature rythmique
+static int mesure = 1;
+static int rythmeBPM = 120;
+static int timeSignatureNum = 4;
+static int timeSignatureDen = 4;
+static double beat = 60.0/120;
+static int sizeBeat =(TOTAL_RECORDER_FRAMES/10.0)*beat;
+static int nextbeat = 0;
+static int countBeat = 1;
+static int countBar = 1;
+static int countBufferPlay = 0;
+static int beatChange = 0;
+static int sizeFractionBeat = sizeBeat/4.;
+static int countFractionBeat = 1;
+
+// sound recoder in hash map and from file register
+map <string, short *> sound_list;
+//static short PLAYING_BUFFER[TOTAL_RECORDER_FRAMES];
+map <string,string> size_sound;
+// pointer and size of the next player buffer to enqueue, and number of remaining buffers
+static short *nextBuffer;
+static unsigned nextSize;
+static int nextCount;
+static int cancel_sound = 0;
+static int STATE_RECORDING=-1;
+static int STATE_PLAYING=1;
+static string NAME_PLAYING = "";
+//class loop using for loop sample
+class Loop
+{
+public:
+    int getSoundNumber() { 
+		return this->soundNumber;
+    } 
+	int getSoundVoiceNumber() { 
+		return this->soundVoiceNumber;
+    } 
+    void setSoundLoope(string uid){
+      this->soundLoope.push_back(uid);
+	  this->soundLoopeState.push_back(STATE_PLAYING);
+	  soundNumber++;
+	}
+    void setSoundVoiceLoope(string uid){
+		this->soundVoiceLoope.push_back(uid);
+		this->soundVoiceLoopeState.push_back(STATE_PLAYING);
+		soundVoiceNumber++;
+	}
+	
+    int setSoundVoiceLoopeState(string uid,int newState){
+		int i;
+		for(i=0;i<this->soundVoiceLoope.size();i++){
+				if(this->soundVoiceLoope[i].compare(uid)==0){
+						this->soundVoiceLoopeState[i]= newState;
+						i=this->soundVoiceLoope.size();
+						return 0;
+					}
+		}
+		return 1;
+    }
+	int setSoundLoopeState(string uid,int newState){
+		int i;
+		for(i=0;i<(this->soundLoope).size();i++){
+				if(this->soundLoope[i].compare(uid)==0){
+						this->soundLoopeState[i]= newState;
+						i=(this->soundLoope).size();
+						return 0;
+					}
+		}
+		return 1;
+		 	
+    }
+	vector<string> getSoundLoope(){
+	   	return this->soundLoope;
+	}
+	vector<string> getSoundVoiceLoope(){
+	   	return this->soundVoiceLoope;
+	}
+	void eraseSoundLoope(string uid){
+		int i;
+		for(i=0;i<(this->soundLoope).size();i++){
+				if(this->soundLoope[i].compare(uid)==0){
+					this->soundLoope.erase (this->soundLoope.begin()+i);
+					this->soundLoopeState.erase (this->soundLoopeState.begin()+i);
+					i=(this->soundLoope).size();
+					soundNumber--;
+				}
+		}	
+	}
+	void eraseSoundVoiceLoope(string uid){
+		int i;
+		for(i=0;i<(this->soundVoiceLoope).size();i++){
+				if(this->soundVoiceLoope[i].compare(uid)==0){
+					this->soundVoiceLoope.erase (this->soundVoiceLoope.begin()+i);
+					this->soundVoiceLoopeState.erase (this->soundVoiceLoopeState.begin()+i);
+					i=(this->soundVoiceLoope).size();
+					soundVoiceNumber--;
+				}
+		}	
+	}
+	//void copyinSummarySound(short* sound,)
+private:
+     vector<string> soundLoope;
+     vector<string> soundVoiceLoope;
+	 vector<int> soundLoopeState;
+	 vector<int> soundVoiceLoopeState;
+	 int soundNumber;
+	 int soundVoiceNumber;
+	 short * summarySound;
+}myLoop;
+
+// synthesize a mono sawtooth wave and place it into a buffer (called automatically on load)
+__attribute__((constructor)) static void onDlOpen(void)
+{
+    unsigned i;
+
+    for (i = 0; i < SAWTOOTH_FRAMES; ++i) {
+        sawtoothBuffer[i] = 32768 - ((i % 100) * 660);
+    }
+}
+
+
+// get current recorderbuffer using mutex
+short *  getCurrentRecorderBuffered(int who){
+	ostringstream oss;
+	 oss<<sizeof(recorderBuffer1)<<"\t"<<who;
+	  LOGI(("value counter: "+oss.str()).c_str());
+     sem_wait(&mutex);
+		 //PRODUCTEUR bqRecordCallback
+		if((countBufferCurrent % bufferNumber) == 0){
+			recorderbufferCurrent = recorderBuffer1;
+			countBufferCurrent++;
+			LOGI(" mutex 1");
+		}
+		else if((countBufferCurrent % bufferNumber) == 1){
+			recorderbufferCurrent =recorderBuffer2;
+			countBufferCurrent++;
+			LOGI("mutex 2");
+		}
+		else{
+			recorderbufferCurrent = recorderBuffer3;
+			countBufferCurrent++;
+			LOGI(" mutex 3");
+		}
+		////////////////// realtime part ////////////////////////////////////
+		//SLresult result;
+	/**if(countBufferCurrent % bufferNumber==0){
+	memcpy(playBuffer1,recorderbufferCurrent,RECORDER_FRAMES*sizeof(short));	
+  result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue,
+      		     		     	playBuffer1,RECORDER_FRAMES*sizeof(short));
+      		     		     	//countBufferCurrent++;
+								LOGI("play1");
+								
+	}
+	else if(countBufferCurrent % bufferNumber==1){
+	memcpy(playBuffer2,recorderbufferCurrent,RECORDER_FRAMES*sizeof(short));	
+    result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue,
+      		     		     	playBuffer2,RECORDER_FRAMES*sizeof(short));
+      		     		     	//countBufferCurrent++;
+								LOGI("play2");
+								
+	}
+	else {
+	memcpy(playBuffer3,recorderbufferCurrent,RECORDER_FRAMES*sizeof(short));	
+    result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue,
+      		     		     	playBuffer3,RECORDER_FRAMES*sizeof(short));
+      		     		     	//countBufferCurrent++;
+								LOGI("play3");
+	}
+		int i;
+    	int stateBuffer = countBufferPlay*RECORDER_FRAMES;
+    	countBufferPlay ++;
+    	for(i=0;i<RECORDER_FRAMES;i++){
+			//if(0){
+    		if((stateBuffer + i) < (nextbeat + RECORDER_FRAMES) && (stateBuffer+i)>= nextbeat){
+    		 beatChange = 1;
+    		 if(countBeat == 1)
+    			mixBuffer[i]=metroBufferHight[i];
+    			else 
+    			mixBuffer[i]=metroBufferLow[i];
+    			 }
+    		else{
+    		//à ajouté beatbar
+    			mixBuffer[i]=recorderbufferCurrent[i];
+    			if(beatChange==1){
+    			  beatChange = 0;
+    			  countBeat = (countBeat + 1)%timeSignatureNum;
+    			  if(countBeat == 1){
+    			     countBar = (countBar+1)%timeSignatureDen;
+    			  }
+    			  nextbeat +=sizeBeat;
+				  
+    			  LOGI("increment metronome---------------------------------------------------->");
+    			}
+    		}
+    }
+    result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue,mixBuffer,RECORDER_FRAMES*sizeof(short));*/
+	//////////////////////////////////////////////////////////////////////
+		sem_post(&mutex);
+    return recorderbufferCurrent;
+}
+//stop music
+void Java_be_umons_ibeatbox_main_NativeAudio_stopMusic(JNIEnv* env, jclass clazz){
+   //(*bqPlayerBufferQueue)->SetState(*bqPlayerBufferQueue, SL_PLAYSTATE_STOPPED);
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_getTimeSignatureDen(JNIEnv* env, jclass clazz){
+   return timeSignatureDen;
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_getTimeSignatureNum(JNIEnv* env, jclass clazz){
+   	return timeSignatureNum;
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setTimeSignatureDen(JNIEnv* env, jclass clazz,jint sign){
+   timeSignatureDen = sign;
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setTimeSignatureNum(JNIEnv* env, jclass clazz,jint sign){
+   	timeSignatureNum = sign;
+}
+//bmp from java
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setBMP(JNIEnv* env, jclass clazz,jint bpm){
+    rythmeBPM = bpm;
+    sizeBeat = (TOTAL_RECORDER_FRAMES/10.0)*(60.0/rythmeBPM);
+}
+
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_getBMP(JNIEnv* env, jclass clazz){
+   	return rythmeBPM;
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setMinute(JNIEnv* env, jclass clazz,jint min){
+    minute = min;
+}
+
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_getMinute(JNIEnv* env, jclass clazz){
+   	return minute;
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_getBeatvalue(JNIEnv* env, jclass clazz){
+    return countBeat;	
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_getBarvalue(JNIEnv* env, jclass clazz){
+    return countBar;	
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_getMesure(JNIEnv* env, jclass clazz){
+    return mesure;	
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setMesure(JNIEnv* env, jclass clazz,jint mes){
+    mesure = mes;	
+}
+extern "C"
+void initCounterRythm(){
+   countBeat=1;
+   countBar=1;
+   countFractionBeat = 1;
+}
+// this callback handler is called every time a buffer finishes playing
+void bqPlayerCallback(SLAndroidSimpleBufferQueueItf bq, void *context){
+    assert(bq == bqPlayerBufferQueue);
+    assert(NULL == context);
+    SLresult result;
+    
+    if(record_play_realtime == IS_REALTIME){
+    	//short * t =getCurrentRecorderBuffered(0);
+	   	memcpy(t,recorderbufferCurrent,RECORDER_FRAMES*sizeof(short));
+    	//result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue,
+    	//	recorderbufferCurrent,RECORDER_FRAMES*sizeof(short));
+    	int i;
+    	int stateBuffer = countBufferPlay*RECORDER_FRAMES;
+    	countBufferPlay ++;
+    	for(i=0;i<RECORDER_FRAMES;i++){
+			//if(0){
+    		if((stateBuffer + i) < (nextbeat + RECORDER_FRAMES) && (stateBuffer+i)>= nextbeat){
+    		 beatChange = 1;
+    		 if(countBeat == 1)
+    			mixBuffer[i]=metroBufferHight[i]+t[i];
+    			else 
+    			mixBuffer[i]=metroBufferLow[i]+t[i];
+    			 }
+    		else{
+    		//à ajouté beatbar
+    			mixBuffer[i]=t[i];
+    			if(beatChange==1){
+    			  beatChange = 0;
+    			  countBeat = (countBeat + 1)%timeSignatureNum;
+    			  if(countBeat == 1){
+    			     countBar = (countBar+1)%timeSignatureDen;
+    			  }
+    			  nextbeat +=sizeBeat;
+				  
+    			  LOGI("increment metronome---------------------------------------------------->");
+    			}
+    		}
+    }
+    result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue,mixBuffer,RECORDER_FRAMES*sizeof(short)); 		     		     	
+    }
+    // for streaming playback, replace this test by logic to find and fill the next buffer
+    else if (--nextCount > 0 && NULL != nextBuffer && 0 != nextSize) {
+        //SLresult result;
+        // enqueue another buffer
+        result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue, nextBuffer, nextSize);
+        // the most likely other result is SL_RESULT_BUFFER_INSUFFICIENT,
+        // which for this code example would indicate a programming error
+        assert(SL_RESULT_SUCCESS == result);
+    }
+    else if (record_play_realtime == IS_LOOPING){
+   
+        	//if loop
+			//assert(SL_RESULT_SUCCESS == result);
+		vector<string> sound = myLoop.getSoundLoope();
+		 if(recorderSize<TOTAL_RECORDER_FRAMES){
+			 ostringstream oss;
+			 int i = 0,j=0,k=0,n=sound.size();
+			 for(i=0;i<RECORDER_FRAMES;i++){
+				 dataCopy[i]=0;
+				 for(j=0;j<n;j++){
+					 dataCopy[i] +=sound_list[sound[j]][i+recorderSize];
+				 	 }
+			 	 }
+			 result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue,dataCopy,RECORDER_FRAMES*sizeof(short));
+			 recorderSize += RECORDER_FRAMES;
+			 oss<<recorderSize;
+			 LOGI(("value counter: "+oss.str()).c_str());
+			//LOGI("loop");
+		 	 	 }
+		 	 /*	 
+		 	 else{
+		     //if loop stop
+		   }
+		}
+		else{
+				//LOGI("loopStop");
+				//result = (*bqPlayerBufferQueue)->SetPlayState(bqPlayerBufferQueue, SL_PLAYSTATE_STOPPED);
+		}*/
+		 }
+  
+}
+
+
+// this callback handler is called every time a buffer finishes recording
+void bqRecorderCallback(SLAndroidSimpleBufferQueueItf bq, void *context)
+{
+    assert(bq == bqrecorderBufferQueue);
+    assert(NULL == context);
+    SLresult result;
+    //trouver SLAndroidSimpleBufferQueueItf
+    // for streaming recording, here we would call Enqueue to give recorder the next buffer to fill
+    // but instead, this is a one-time buffer so we stop recording
+    short * recorderbuffer = getCurrentRecorderBuffered(1);
+    //copie du buffer courant dans le grand buffer       
+    memcpy(recorderBuffer_TOTAL+recorderSize,recorderbuffer,RECORDER_FRAMES*sizeof(short));
+    recorderSize += RECORDER_FRAMES;
+						
+    if(recorderSize<TOTAL_RECORDER_FRAMES-(bufferNumber*RECORDER_FRAMES)){
+    	result = (*recorderBufferQueue)->Enqueue(bq,recorderbuffer,
+    	            RECORDER_FRAMES * sizeof(short));
+    }
+    else{
+    result = (*recorderRecord)->SetRecordState(recorderRecord, SL_RECORDSTATE_STOPPED);
+    record_play_realtime = 0;
+    initCounterRythm();
+    }
+    if (SL_RESULT_SUCCESS == result) {
+        //recorderSize = RECORDER_FRAMES * sizeof(short);
+        recorderSR = SL_SAMPLINGRATE_8;
+    }
+}
+extern "C"
+void  Java_be_umons_ibeatbox_main_NativeAudio_myRecordBuffer(JNIEnv* env, jclass clazz){
+
+}
+extern "C"
+class SoundTraitemnt
+{
+public:
+    int testSoundBorne() const { 
+    int i;
+    for(i=0;i<128;i++){
+       if(this->recorder[i]>4000 || this->recorder[i]<(-4000)){
+          return 1;
+       }
+    }
+    return 0; } 
+    void setSound(short *value){this->recorder = value;}
+private:
+     short * recorder;
+}mysound;
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_SoundTraitemnt(JNIEnv* env, jclass clazz){
+			 SoundTraitemnt mysound ;
+			 short * t =getCurrentRecorderBuffered(0);
+			 mysound.setSound(t);
+	   return mysound.testSoundBorne();
+}
+// create the engine and output mix objects
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_createEngine(JNIEnv* env, jclass clazz)
+{
+    SLresult result;
+    // create engine
+    result = slCreateEngine(&engineObject, 0, NULL, 0, NULL, NULL);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // realize the engine
+    result = (*engineObject)->Realize(engineObject, SL_BOOLEAN_FALSE);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the engine interface, which is needed in order to create other objects
+    result = (*engineObject)->GetInterface(engineObject, SL_IID_ENGINE, &engineEngine);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // create output mix, with environmental reverb specified as a non-required interface
+    const SLInterfaceID ids[1] = {SL_IID_ENVIRONMENTALREVERB};
+    const SLboolean req[1] = {SL_BOOLEAN_FALSE};
+    result = (*engineEngine)->CreateOutputMix(engineEngine, &outputMixObject, 1, ids, req);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // realize the output mix
+    result = (*outputMixObject)->Realize(outputMixObject, SL_BOOLEAN_FALSE);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the environmental reverb interface
+    // this could fail if the environmental reverb effect is not available,
+    // either because the feature is not present, excessive CPU load, or
+    // the required MODIFY_AUDIO_SETTINGS permission was not requested and granted
+    result = (*outputMixObject)->GetInterface(outputMixObject, SL_IID_ENVIRONMENTALREVERB,
+            &outputMixEnvironmentalReverb);
+    if (SL_RESULT_SUCCESS == result) {
+        result = (*outputMixEnvironmentalReverb)->SetEnvironmentalReverbProperties(
+                outputMixEnvironmentalReverb, &reverbSettings);
+    }
+    // ignore unsuccessful result codes for environmental reverb, as it is optional for this example
+
+}
+
+
+// create buffer queue audio player
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_createBufferQueueAudioPlayer(JNIEnv* env,
+        jclass clazz)
+{
+    SLresult result;
+
+    // configure audio source
+    SLDataLocator_AndroidSimpleBufferQueue loc_bufq = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2};
+    SLDataFormat_PCM format_pcm = {SL_DATAFORMAT_PCM, 1, SL_SAMPLINGRATE_8,
+        SL_PCMSAMPLEFORMAT_FIXED_16, SL_PCMSAMPLEFORMAT_FIXED_16,
+        SL_SPEAKER_FRONT_CENTER, SL_BYTEORDER_LITTLEENDIAN};
+
+
+    SLDataSource audioSrc = {&loc_bufq, &format_pcm};
+
+    // configure audio sink
+    SLDataLocator_OutputMix loc_outmix = {SL_DATALOCATOR_OUTPUTMIX, outputMixObject};
+    SLDataSink audioSnk = {&loc_outmix, NULL};
+
+    // create audio player
+    const SLInterfaceID ids[3] = {SL_IID_BUFFERQUEUE, SL_IID_EFFECTSEND,
+            /*SL_IID_MUTESOLO,*/ SL_IID_VOLUME};
+    const SLboolean req[3] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE,
+            /*SL_BOOLEAN_TRUE,*/ SL_BOOLEAN_TRUE};
+    result = (*engineEngine)->CreateAudioPlayer(engineEngine, &bqPlayerObject, &audioSrc, &audioSnk,
+            3, ids, req);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // realize the player
+    result = (*bqPlayerObject)->Realize(bqPlayerObject, SL_BOOLEAN_FALSE);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the play interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_PLAY, &bqPlayerPlay);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the buffer queue interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_BUFFERQUEUE,
+            &bqPlayerBufferQueue);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // register callback on the buffer queue
+    result = (*bqPlayerBufferQueue)->RegisterCallback(bqPlayerBufferQueue, bqPlayerCallback, NULL);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the effect send interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_EFFECTSEND,
+            &bqPlayerEffectSend);
+    assert(SL_RESULT_SUCCESS == result);
+
+#if 0   // mute/solo is not supported for sources that are known to be mono, as this is
+    // get the mute/solo interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_MUTESOLO, &bqPlayerMuteSolo);
+    assert(SL_RESULT_SUCCESS == result);
+#endif
+
+    // get the volume interface
+    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_VOLUME, &bqPlayerVolume);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // set the player's state to playing
+    result = (*bqPlayerPlay)->SetPlayState(bqPlayerPlay, SL_PLAYSTATE_PLAYING);
+    assert(SL_RESULT_SUCCESS == result);
+
+}
+
+
+// create URI audio player
+extern "C"
+jboolean Java_be_umons_ibeatbox_main_NativeAudio_createUriAudioPlayer(JNIEnv* env, jclass clazz,
+        jstring uri)
+{
+
+    SLresult result;
+
+    // convert Java string to UTF-8
+    const char *utf8 = env->GetStringUTFChars(uri, NULL);
+    assert(NULL != utf8);
+
+    // configure audio source
+    // (requires the INTERNET permission depending on the uri parameter)
+    SLDataLocator_URI loc_uri = {SL_DATALOCATOR_URI, (SLchar *) utf8};
+    SLDataFormat_MIME format_mime = {SL_DATAFORMAT_MIME, NULL, SL_CONTAINERTYPE_UNSPECIFIED};
+    SLDataSource audioSrc = {&loc_uri, &format_mime};
+
+    // configure audio sink
+    SLDataLocator_OutputMix loc_outmix = {SL_DATALOCATOR_OUTPUTMIX, outputMixObject};
+    SLDataSink audioSnk = {&loc_outmix, NULL};
+
+    // create audio player
+    const SLInterfaceID ids[3] = {SL_IID_SEEK, SL_IID_MUTESOLO, SL_IID_VOLUME};
+    const SLboolean req[3] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE};
+    result = (*engineEngine)->CreateAudioPlayer(engineEngine, &uriPlayerObject, &audioSrc,
+            &audioSnk, 3, ids, req);
+    // note that an invalid URI is not detected here, but during prepare/prefetch on Android,
+    // or possibly during Realize on other platforms
+    assert(SL_RESULT_SUCCESS == result);
+
+    // release the Java string and UTF-8
+    env->ReleaseStringUTFChars(uri, utf8);
+
+    // realize the player
+    result = (*uriPlayerObject)->Realize(uriPlayerObject, SL_BOOLEAN_FALSE);
+    // this will always succeed on Android, but we check result for portability to other platforms
+    if (SL_RESULT_SUCCESS != result) {
+        (*uriPlayerObject)->Destroy(uriPlayerObject);
+        uriPlayerObject = NULL;
+        return JNI_FALSE;
+    }
+
+    // get the play interface
+    result = (*uriPlayerObject)->GetInterface(uriPlayerObject, SL_IID_PLAY, &uriPlayerPlay);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the seek interface
+    result = (*uriPlayerObject)->GetInterface(uriPlayerObject, SL_IID_SEEK, &uriPlayerSeek);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the mute/solo interface
+    result = (*uriPlayerObject)->GetInterface(uriPlayerObject, SL_IID_MUTESOLO, &uriPlayerMuteSolo);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the volume interface
+    result = (*uriPlayerObject)->GetInterface(uriPlayerObject, SL_IID_VOLUME, &uriPlayerVolume);
+    assert(SL_RESULT_SUCCESS == result);
+
+    return JNI_TRUE;
+}
+
+
+// set the playing state for the URI audio player
+// to PLAYING (true) or PAUSED (false)
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setPlayingUriAudioPlayer(JNIEnv* env,
+        jclass clazz, jboolean isPlaying)
+{
+    SLresult result;
+
+    // make sure the URI audio player was created
+    if (NULL != uriPlayerPlay) {
+
+        // set the player's state
+        result = (*uriPlayerPlay)->SetPlayState(uriPlayerPlay, isPlaying ?
+            SL_PLAYSTATE_PLAYING : SL_PLAYSTATE_PAUSED);
+        assert(SL_RESULT_SUCCESS == result);
+
+    }
+
+}
+
+
+// set the whole file looping state for the URI audio player
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setLoopingUriAudioPlayer(JNIEnv* env,
+        jclass clazz, jboolean isLooping)
+{
+    SLresult result;
+
+    // make sure the URI audio player was created
+    if (NULL != uriPlayerSeek) {
+
+        // set the looping state
+        result = (*uriPlayerSeek)->SetLoop(uriPlayerSeek, (SLboolean) isLooping, 0,
+                SL_TIME_UNKNOWN);
+        assert(SL_RESULT_SUCCESS == result);
+
+    }
+
+}
+
+
+// expose the mute/solo APIs to Java for one of the 3 players
+
+static SLMuteSoloItf getMuteSolo()
+{
+    if (uriPlayerMuteSolo != NULL)
+        return uriPlayerMuteSolo;
+    else if (fdPlayerMuteSolo != NULL)
+        return fdPlayerMuteSolo;
+    else
+        return bqPlayerMuteSolo;
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setChannelMuteUriAudioPlayer(JNIEnv* env,
+        jclass clazz, jint chan, jboolean mute)
+{
+    SLresult result;
+    SLMuteSoloItf muteSoloItf = getMuteSolo();
+    if (NULL != muteSoloItf) {
+        result = (*muteSoloItf)->SetChannelMute(muteSoloItf, chan, mute);
+        assert(SL_RESULT_SUCCESS == result);
+    }
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setChannelSoloUriAudioPlayer(JNIEnv* env,
+        jclass clazz, jint chan, jboolean solo)
+{
+    SLresult result;
+    SLMuteSoloItf muteSoloItf = getMuteSolo();
+    if (NULL != muteSoloItf) {
+        result = (*muteSoloItf)->SetChannelSolo(muteSoloItf, chan, solo);
+        assert(SL_RESULT_SUCCESS == result);
+    }
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_getNumChannelsUriAudioPlayer(JNIEnv* env, jclass clazz)
+{
+    SLuint8 numChannels;
+    SLresult result;
+    SLMuteSoloItf muteSoloItf = getMuteSolo();
+    if (NULL != muteSoloItf) {
+        result = (*muteSoloItf)->GetNumChannels(muteSoloItf, &numChannels);
+        if (SL_RESULT_PRECONDITIONS_VIOLATED == result) {
+            // channel count is not yet known
+            numChannels = 0;
+        } else {
+            assert(SL_RESULT_SUCCESS == result);
+        }
+    } else {
+        numChannels = 0;
+    }
+    return numChannels;
+}
+
+// expose the volume APIs to Java for one of the 3 players
+
+static SLVolumeItf getVolume()
+{
+    if (uriPlayerVolume != NULL)
+        return uriPlayerVolume;
+    else if (fdPlayerVolume != NULL)
+        return fdPlayerVolume;
+    else
+        return bqPlayerVolume;
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setVolumeUriAudioPlayer(JNIEnv* env, jclass clazz,
+        jint millibel)
+{
+    SLresult result;
+    SLVolumeItf volumeItf = getVolume();
+    if (NULL != volumeItf) {
+        result = (*volumeItf)->SetVolumeLevel(volumeItf, millibel);
+        assert(SL_RESULT_SUCCESS == result);
+    }
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setMuteUriAudioPlayer(JNIEnv* env, jclass clazz,
+        jboolean mute)
+{
+    SLresult result;
+    SLVolumeItf volumeItf = getVolume();
+    if (NULL != volumeItf) {
+        result = (*volumeItf)->SetMute(volumeItf, mute);
+        assert(SL_RESULT_SUCCESS == result);
+    }
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_enableStereoPositionUriAudioPlayer(JNIEnv* env,
+        jclass clazz, jboolean enable)
+{
+    SLresult result;
+    SLVolumeItf volumeItf = getVolume();
+    if (NULL != volumeItf) {
+        result = (*volumeItf)->EnableStereoPosition(volumeItf, enable);
+        assert(SL_RESULT_SUCCESS == result);
+    }
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setStereoPositionUriAudioPlayer(JNIEnv* env,
+        jclass clazz, jint permille)
+{
+    SLresult result;
+    SLVolumeItf volumeItf = getVolume();
+    if (NULL != volumeItf) {
+        result = (*volumeItf)->SetStereoPosition(volumeItf, permille);
+        assert(SL_RESULT_SUCCESS == result);
+    }
+}
+
+// enable reverb on the buffer queue player
+extern "C"
+jboolean Java_be_umons_ibeatbox_main_NativeAudio_enableReverb(JNIEnv* env, jclass clazz,
+        jboolean enabled){
+    SLresult result;
+    // we might not have been able to add environmental reverb to the output mix
+    if (NULL == outputMixEnvironmentalReverb) {
+        return JNI_FALSE;
+    }
+    result = (*bqPlayerEffectSend)->EnableEffectSend(bqPlayerEffectSend,
+            outputMixEnvironmentalReverb, (SLboolean) enabled, (SLmillibel) 0);
+    // and even if environmental reverb was present, it might no longer be available
+    if (SL_RESULT_SUCCESS != result) {
+        return JNI_FALSE;
+    }
+
+    return JNI_TRUE;
+}
+
+
+// select the desired clip and play count, and enqueue the first buffer if idle
+extern "C"
+jboolean Java_be_umons_ibeatbox_main_NativeAudio_selectClip(JNIEnv* env, jclass clazz, jint which,
+        jint count)
+{	(*bqPlayerPlay)->SetPlayState(bqPlayerPlay, SL_PLAYSTATE_PLAYING);
+    short *oldBuffer = nextBuffer;
+    switch (which) {
+    case 0:     // CLIP_NONE
+        nextBuffer = (short *) NULL;
+        nextSize = 0;
+        break;
+    case 1:     // CLIP_HELLO
+        nextBuffer = (short *) hello;
+        nextSize = sizeof(hello);
+        break;
+    case 2:     // CLIP_ANDROID
+        nextBuffer = (short *) android;
+        nextSize = sizeof(android);
+        break;
+    case 3:     // CLIP_SAWTOOTH
+        nextBuffer = sawtoothBuffer;
+        nextSize = sizeof(sawtoothBuffer);
+        break;
+    case 4:     // CLIP_PLAYBACK
+        // we recorded at 16 kHz, but are playing buffers at 8 Khz, so do a primitive down-sample
+    	/**myValue = myValue+1;
+        if (recorderSR == SL_SAMPLINGRATE_16) {
+            unsigned i;
+            for (i = 0; i < recorderSize; i += 2) {
+                recorderBuffer_TOTAL[i/2] = recorderBuffer_TOTAL[i];
+            }
+            recorderSR = SL_SAMPLINGRATE_8;
+            recorderSize /= 2;
+
+        }*/
+    	//recorderSR = SL_SAMPLINGRATE_8;
+    	   LOGI(("playing :"+NAME_PLAYING).c_str());
+        nextBuffer = recorderBuffer_TOTAL;
+        nextSize = TOTAL_RECORDER_FRAMES;//recorderSize;
+        break;
+    default:
+        nextBuffer = NULL;
+        nextSize = 0;
+        break;
+    }
+    nextCount = count;
+    if (nextSize > 0) {
+		LOGI("PLAYING");
+        // here we only enqueue one buffer because it is a long clip,
+        // but for streaming playback we would typically enqueue at least 2 buffers to start
+        SLresult result;
+        result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue, nextBuffer, nextSize*sizeof(short));
+        if (SL_RESULT_SUCCESS != result) {
+            return JNI_FALSE;
+        }
+    }
+
+    return JNI_TRUE;
+}
+
+
+// create asset audio player
+extern "C"
+jboolean Java_be_umons_ibeatbox_main_NativeAudio_createAssetAudioPlayer(JNIEnv* env, jclass clazz,
+        jobject assetManager, jstring filename)
+{
+	SLresult result;
+
+    // convert Java string to UTF-8
+    const char *utf8 = env->GetStringUTFChars(filename, NULL);
+    assert(NULL != utf8);
+
+    // use asset manager to open asset by filename
+    AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
+    assert(NULL != mgr);
+    AAsset* asset = AAssetManager_open(mgr, utf8, AASSET_MODE_UNKNOWN);
+
+    // release the Java string and UTF-8
+    env->ReleaseStringUTFChars(filename, utf8);
+
+    // the asset might not be found
+    if (NULL == asset) {
+        return JNI_FALSE;
+    }
+
+    // open asset as file descriptor
+    off_t start, length;
+    int fd = AAsset_openFileDescriptor(asset, &start, &length);
+    assert(0 <= fd);
+    AAsset_close(asset);
+
+    // configure audio source
+    SLDataLocator_AndroidFD loc_fd = {SL_DATALOCATOR_ANDROIDFD, fd, start, length};
+    SLDataFormat_MIME format_mime = {SL_DATAFORMAT_MIME, NULL, SL_CONTAINERTYPE_UNSPECIFIED};
+    SLDataSource audioSrc = {&loc_fd, &format_mime};
+
+    // configure audio sink
+    SLDataLocator_OutputMix loc_outmix = {SL_DATALOCATOR_OUTPUTMIX, outputMixObject};
+    SLDataSink audioSnk = {&loc_outmix, NULL};
+
+    // create audio player
+    const SLInterfaceID ids[3] = {SL_IID_SEEK, SL_IID_MUTESOLO, SL_IID_VOLUME};
+    const SLboolean req[3] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE};
+    result = (*engineEngine)->CreateAudioPlayer(engineEngine, &fdPlayerObject, &audioSrc, &audioSnk,
+            3, ids, req);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // realize the player
+    result = (*fdPlayerObject)->Realize(fdPlayerObject, SL_BOOLEAN_FALSE);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the play interface
+    result = (*fdPlayerObject)->GetInterface(fdPlayerObject, SL_IID_PLAY, &fdPlayerPlay);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the seek interface
+    result = (*fdPlayerObject)->GetInterface(fdPlayerObject, SL_IID_SEEK, &fdPlayerSeek);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the mute/solo interface
+    result = (*fdPlayerObject)->GetInterface(fdPlayerObject, SL_IID_MUTESOLO, &fdPlayerMuteSolo);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the volume interface
+    result = (*fdPlayerObject)->GetInterface(fdPlayerObject, SL_IID_VOLUME, &fdPlayerVolume);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // enable whole file looping
+    result = (*fdPlayerSeek)->SetLoop(fdPlayerSeek, SL_BOOLEAN_TRUE, 0, SL_TIME_UNKNOWN);
+    assert(SL_RESULT_SUCCESS == result);
+    return JNI_TRUE;
+}
+
+
+// set the playing state for the asset audio player
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setPlayingAssetAudioPlayer(JNIEnv* env,
+        jclass clazz, jboolean isPlaying)
+{
+    SLresult result;
+
+    // make sure the asset audio player was created
+    if (NULL != fdPlayerPlay) {
+
+        // set the player's state
+        result = (*fdPlayerPlay)->SetPlayState(fdPlayerPlay, isPlaying ?
+            SL_PLAYSTATE_PLAYING : SL_PLAYSTATE_PAUSED);
+        assert(SL_RESULT_SUCCESS == result);
+
+    }
+
+}
+
+
+// create audio recorder
+extern "C"
+jboolean Java_be_umons_ibeatbox_main_NativeAudio_createAudioRecorder(JNIEnv* env, jclass clazz)
+{
+    SLresult result;
+
+    // configure audio source
+    SLDataLocator_IODevice loc_dev = {SL_DATALOCATOR_IODEVICE, SL_IODEVICE_AUDIOINPUT,
+            SL_DEFAULTDEVICEID_AUDIOINPUT, NULL};
+    SLDataSource audioSrc = {&loc_dev, NULL};
+    
+   
+    // configure audio sink
+    SLDataLocator_AndroidSimpleBufferQueue loc_bq = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2};
+    SLDataFormat_PCM format_pcm = {SL_DATAFORMAT_PCM, 1, SL_SAMPLINGRATE_8,
+        SL_PCMSAMPLEFORMAT_FIXED_16, SL_PCMSAMPLEFORMAT_FIXED_16,
+        SL_SPEAKER_FRONT_CENTER, SL_BYTEORDER_LITTLEENDIAN};
+    SLDataSink audioSnk = {&loc_bq, &format_pcm};
+
+    // create audio recorder
+    // (requires the RECORD_AUDIO permission)
+    const SLInterfaceID id[1] = {SL_IID_ANDROIDSIMPLEBUFFERQUEUE};
+    const SLboolean req[1] = {SL_BOOLEAN_TRUE};
+    //debut semaphore
+    sem_init(&mutex, 0, 1);
+    result = (*engineEngine)->CreateAudioRecorder(engineEngine, &recorderObject, &audioSrc,
+            &audioSnk, 1, id, req);
+    if (SL_RESULT_SUCCESS != result) {
+        return JNI_FALSE;
+    }
+
+    // realize the audio recorder
+    result = (*recorderObject)->Realize(recorderObject, SL_BOOLEAN_FALSE);
+    if (SL_RESULT_SUCCESS != result) {
+        return JNI_FALSE;
+    }
+
+    // get the record interface
+    result = (*recorderObject)->GetInterface(recorderObject, SL_IID_RECORD, &recorderRecord);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // get the buffer queue interface
+    result = (*recorderObject)->GetInterface(recorderObject, SL_IID_ANDROIDSIMPLEBUFFERQUEUE,
+            &recorderBufferQueue);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // register callback on the buffer queue
+    result = (*recorderBufferQueue)->RegisterCallback(recorderBufferQueue, bqRecorderCallback,
+            NULL);
+    assert(SL_RESULT_SUCCESS == result);
+
+    return JNI_TRUE;
+}
+
+
+// set the recording state for the audio recorder
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_startRecording(JNIEnv* env, jclass clazz)
+{
+    SLresult result;
+    //for __android_log_print(ANDROID_LOG_INFO, "YourApp", "formatted message");
+    // in case already recording, stop recording and clear buffer queue
+    result = (*recorderRecord)->SetRecordState(recorderRecord, SL_RECORDSTATE_STOPPED);
+    assert(SL_RESULT_SUCCESS == result);
+    result = (*recorderBufferQueue)->Clear(recorderBufferQueue);
+    assert(SL_RESULT_SUCCESS == result);
+
+    // the buffer is not valid for playback yet
+    recorderSize = 0;
+
+    // enqueue an empty buffer to be filled by the recorder
+     //(for streaming recording, we would enqueue at least 2 empty buffers to start things off)
+    record_play_realtime = IS_REALTIME;
+    countPlayer = 0;
+    // play before
+    //short metro[RECORDER_FRAMES];
+    int k;
+    for(k=0;k<RECORDER_FRAMES;k++){
+    	metroBufferHight[k] = (rand()%8000)-4000;
+    	metroBufferLow[k] = metroBufferHight[k]/2;
+    	metroBufferNull[k] = 0;
+    }
+result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue, metroBufferHight,RECORDER_FRAMES*sizeof(short));
+	result = (*recorderBufferQueue)->Enqueue(recorderBufferQueue, recorderBuffer1,
+            RECORDER_FRAMES * sizeof(short));
+    result = (*recorderBufferQueue)->Enqueue(recorderBufferQueue, recorderBuffer2,
+                RECORDER_FRAMES * sizeof(short));
+    result = (*recorderBufferQueue)->Enqueue(recorderBufferQueue, recorderBuffer3,
+                    RECORDER_FRAMES * sizeof(short));
+    // the most likely other result is SL_RESULT_BUFFER_INSUFFICIENT,
+    // which for this code example would indicate a programming error
+    assert(SL_RESULT_SUCCESS == result);
+
+    // start recording
+    result = (*recorderRecord)->SetRecordState(recorderRecord, SL_RECORDSTATE_RECORDING);
+    assert(SL_RESULT_SUCCESS == result);
+
+}
+
+
+// shut down the native audio system
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_shutdown(JNIEnv* env, jclass clazz)
+{
+
+    // destroy buffer queue audio player object, and invalidate all associated interfaces
+    if (bqPlayerObject != NULL) {
+        (*bqPlayerObject)->Destroy(bqPlayerObject);
+        bqPlayerObject = NULL;
+        bqPlayerPlay = NULL;
+        bqPlayerBufferQueue = NULL;
+        bqPlayerEffectSend = NULL;
+        bqPlayerMuteSolo = NULL;
+        bqPlayerVolume = NULL;
+    }
+
+    // destroy file descriptor audio player object, and invalidate all associated interfaces
+    if (fdPlayerObject != NULL) {
+        (*fdPlayerObject)->Destroy(fdPlayerObject);
+        fdPlayerObject = NULL;
+        fdPlayerPlay = NULL;
+        fdPlayerSeek = NULL;
+        fdPlayerMuteSolo = NULL;
+        fdPlayerVolume = NULL;
+    }
+
+    // destroy URI audio player object, and invalidate all associated interfaces
+    if (uriPlayerObject != NULL) {
+        (*uriPlayerObject)->Destroy(uriPlayerObject);
+        uriPlayerObject = NULL;
+        uriPlayerPlay = NULL;
+        uriPlayerSeek = NULL;
+        uriPlayerMuteSolo = NULL;
+        uriPlayerVolume = NULL;
+    }
+
+    // destroy audio recorder object, and invalidate all associated interfaces
+    if (recorderObject != NULL) {
+        (*recorderObject)->Destroy(recorderObject);
+        recorderObject = NULL;
+        recorderRecord = NULL;
+        recorderBufferQueue = NULL;
+    }
+
+    // destroy output mix object, and invalidate all associated interfaces
+    if (outputMixObject != NULL) {
+        (*outputMixObject)->Destroy(outputMixObject);
+        outputMixObject = NULL;
+        outputMixEnvironmentalReverb = NULL;
+    }
+
+    // destroy engine object, and invalidate all associated interfaces
+    if (engineObject != NULL) {
+        (*engineObject)->Destroy(engineObject);
+        engineObject = NULL;
+        engineEngine = NULL;
+    }
+}
+extern "C"
+int saveDataFile(string name,short * data,int size,string open){
+    FILE * file;
+	   sound_list[name] = data;
+   	file = fopen(name.c_str(),open.c_str());
+    if (file != NULL){
+    	   stringstream ss;
+    	   int i;
+    	   ss<<size<<":";
+    	   for(i=0;i<size;i++){
+          ss << data[i]<<";";
+          }
+         string str;
+         ss >> str;
+         const char* val;
+         val =str.c_str();
+         fputs (val,file);
+         fclose (file); 
+         return 0;
+      }
+	return -1;
+}        	   
+extern "C"
+int getSizeDataSound(string name){
+     ifstream myfile(name.c_str());
+  if(myfile.is_open()){
+    string ligne;
+    int tester;
+    LOGI("get data file open",name.c_str());
+   while(getline(myfile, ligne))
+     {   //LOGI(ligne.c_str());
+         string soundSize,value,tmp1=";",tmp2=":";
+         int i,s=0,taille = ligne.size ();
+         for (i = 0 ; i < taille ; ++i){
+         stringstream ss;
+         string str;
+          ss << ligne.at(i);
+          ss >> str;
+          int test = str.compare(tmp2);
+          if(test==0){
+            //soundSize = value;
+            ss<<value;
+            ss>>soundSize;
+            sound = new short[soundSize];
+		         	size_sound[name] = value;
+			         LOGI(soundSize.c_str());
+            value="";
+           }
+           else
+              value =value +str;
+}
+int getDataFile(string name){
+ int soundSize =0;
+ short * sound; 
+ ifstream myfile(name.c_str());
+  if(myfile.is_open()){
+    string ligne;
+    int tester;
+    LOGI("get data file open",name.c_str());
+   while(getline(myfile, ligne))
+     {   //LOGI(ligne.c_str());
+         string soundSize,value,tmp1=";",tmp2=":";
+         int i,s=0,taille = ligne.size ();
+         for (i = 0 ; i < taille ; ++i){
+         stringstream ss;
+         string str;
+          ss << ligne.at(i);
+          ss >> str;
+          int test = str.compare(tmp2);
+          if(test==0){
+            //soundSize = value;
+            ss<<value;
+            ss>>soundSize;
+            sound = new short[soundSize];
+			size_sound[name] = value;
+			LOGI(soundSize.c_str());
+            value="";
+           }
+           else if(str.compare(tmp1)==0){
+             istringstream istr(value);
+             int k;
+             //if(istr >> k && s <TOTAL_RECORDER_FRAMES){
+             if(istr >> k && s <soundSize){
+             //recorderBuffer_TOTAL[s]=k;
+              sound[s]=k;
+              ++s;
+             }
+             else
+             cout << "no";
+             value = "";
+           }
+           else{
+           value =value +str;
+           }
+       }
+       //new line 
+       //sound_list[name] = recorderBuffer_TOTAL;
+       sound_list[name]= sound;
+       NAME_PLAYING = name+" size :"+size_sound[name];
+       LOGI(("sound save in map"+name).c_str());
+      }
+      return 0;
+   }
+ else{
+    LOGI(("file no open "+name).c_str());
+    return -1;
+ }
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_saveRecordsFile(JNIEnv* env, jclass clazz,jstring soundname){
+	const char *utf8 = env->GetStringUTFChars(soundname, NULL);
+	string name = utf8;
+	return saveDataFile(name,recorderBuffer_TOTAL,TOTAL_RECORDER_FRAMES,"a");
+
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_getRecordsFile(JNIEnv* env, jclass clazz,jstring filename){
+  const char *utf8 = env->GetStringUTFChars(filename, NULL);
+	string name = utf8;
+	if(sound_list.find(name)== sound_list.end()){
+	int a = getDataFile(name);
+	if(a)
+	memcpy(recorderBuffer_TOTAL,sound_list[name],TOTAL_RECORDER_FRAMES*sizeof(short));
+	}
+	else{
+		memcpy(recorderBuffer_TOTAL,sound_list[name],TOTAL_RECORDER_FRAMES*sizeof(short));
+		return 0;
+	}
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_deleteSound(JNIEnv* env, jclass clazz,jstring filename){
+ const char *utf8 = env->GetStringUTFChars(filename, NULL);
+	string name = utf8;
+	if(remove(utf8) != 0)
+	  LOGI("Error deleting file");
+	else
+	LOGI("File successfully deleted");  
+ sound_list.erase(name);
+ cancel_sound=1;
+ return cancel_sound;
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_startLoop(JNIEnv* env, jclass clazz){
+	if(myLoop.getSoundNumber()>0){
+		//start loop
+		record_play_realtime = IS_LOOPING;
+		// get all data sound aviable
+		vector<string> soundVoice = myLoop.getSoundVoiceLoope();
+		vector<string> sound = myLoop.getSoundLoope();
+		
+		SLresult result;
+    //for __android_log_print(ANDROID_LOG_INFO, "YourApp", "formatted message");
+    // in case already recording, stop recording and clear buffer queue
+    result = (*recorderRecord)->SetRecordState(recorderRecord, SL_RECORDSTATE_STOPPED);
+    assert(SL_RESULT_SUCCESS == result);
+    result = (*recorderBufferQueue)->Clear(recorderBufferQueue);
+    assert(SL_RESULT_SUCCESS == result);
+    int i = 0,j=0,k=0,n=sound.size();
+	countBufferPlay = 4;
+	 ostringstream oss;
+	for(i=0;i<RECORDER_FRAMES;i++){
+	 dataCopy[i]=0;
+	  for(j=0;j<n;j++){
+	    //somme de buffer
+	    oss<<sound_list[sound[j]][i+recorderSize];
+	     LOGI(("value counter: "+oss.str()).c_str()); 
+		   dataCopy[i] +=sound_list[sound[j]][i+recorderSize];
+		   }
+		    oss<<dataCopy[i];
+		  } 
+		  LOGI(("value counter: "+oss.str()).c_str()); 
+		result = (*bqPlayerBufferQueue)->Enqueue(bqPlayerBufferQueue,dataCopy,RECORDER_FRAMES*sizeof(short));
+		recorderSize += RECORDER_FRAMES;
+	}
+	
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_stopLoop(JNIEnv* env, jclass clazz){
+	if(myLoop.getSoundNumber()>0){
+		//stop loop
+		}
+	else
+		LOGI("Sound map is Empy");
+			
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_setStateRecordSound(JNIEnv* env, jclass clazz,
+jstring uuid,jint isActive){
+	const char *utf3 = env->GetStringUTFChars(uuid, NULL);
+	string uid = utf3;
+	if(isActive== 0)
+	return myLoop.setSoundLoopeState(uid,STATE_RECORDING);
+	else
+	return myLoop.setSoundLoopeState(uid,STATE_PLAYING);	
+	
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_setStateRecordVoiceSound(JNIEnv* env, jclass clazz,
+jstring uuid,jint isActive){
+	const char *utf3 = env->GetStringUTFChars(uuid, NULL);
+	string uid = utf3;
+	if(isActive== 0)
+	return myLoop.setSoundVoiceLoopeState(uid,STATE_RECORDING);
+	else
+	 return myLoop.setSoundVoiceLoopeState(uid,STATE_PLAYING);	
+	
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_eraseSoundLoope(JNIEnv* env, jclass clazz,
+jstring uuid){
+	const char *utf3 = env->GetStringUTFChars(uuid, NULL);
+	string uid = utf3;
+	myLoop.eraseSoundLoope(uid);
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_eraseSoundVoiceLoope(JNIEnv* env, jclass clazz,
+jstring uuid){
+	const char *utf3 = env->GetStringUTFChars(uuid, NULL);
+	string uid = utf3;
+	myLoop.eraseSoundVoiceLoope(uid);
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setLoopUIDSound(JNIEnv* env, jclass clazz,
+jstring uuid){
+	const char *utf3 = env->GetStringUTFChars(uuid, NULL);
+	string name = utf3;
+	if(sound_list.find(name)== sound_list.end()){
+	getDataFile(name);
+	}
+	else{
+		memcpy(recorderBuffer_TOTAL,sound_list[name],TOTAL_RECORDER_FRAMES*sizeof(short));}
+	myLoop.setSoundLoope(name);
+    
+}
+extern "C"
+void Java_be_umons_ibeatbox_main_NativeAudio_setVoiceLoopUIDSound(JNIEnv* env, jclass clazz,
+jstring uuid){
+	const char *utf3 = env->GetStringUTFChars(uuid, NULL);
+	string uid = utf3;
+	sound_list[uid]=recorderBuffer_TOTAL;
+	myLoop.setSoundVoiceLoope(uid);
+	
+}
+//function call when close android app to save all modifie about register sound
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_exitApp(JNIEnv* env, jclass clazz){
+   /**if(cancel_sound==1){
+      map<string,short *>::iterator iter;
+      for (iter=sound_list.begin(); iter!=sound_list.end(); ++iter){
+     saveDataFile(iter->first,iter->second,TOTAL_RECORDER_FRAMES,"w+");
+     }
+    }
+    else 
+      sound_list.clear();*/
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_setCurrentSound(JNIEnv* env, jclass clazz,
+jstring dbName,jstring soundName){
+    const char *databaseName = env->GetStringUTFChars(dbName, NULL);
+  const char *s_name = env->GetStringUTFChars(soundName, NULL);
+  const char *sql;
+   sqlite3 * db;
+   sqlite3_stmt * stmt;
+   int i;
+   CALL_SQLITE (open (databaseName, & db));
+   stringstream ss;
+   ss <<s_name<<"'";
+   string str;
+   ss>>str;
+   string request ="SELECT * FROM id_music_bytes where id = '";
+   request += str;
+   sql = request.c_str();
+   CALL_SQLITE (prepare_v2 (db,sql, strlen (sql) + 1, & stmt, NULL));
+   while (1) {
+        int s;
+        s = sqlite3_step (stmt);
+        if (s == SQLITE_ROW) {
+            //int bytes;
+             char * name; 
+             short * sound; 
+            //bytes = sqlite3_column_bytes(stmt, 0);
+            name  = (char *)sqlite3_column_text (stmt, 0);
+            sound_list[s_name] = (short *)sqlite3_column_blob(stmt, 1);
+            memcpy(recorderBuffer_TOTAL,sound_list[s_name],TOTAL_RECORDER_FRAMES*sizeof(short));
+        }
+        else if (s == SQLITE_DONE) {
+            break;
+        }
+        else {
+            LOGI("Failed.\n");
+            exit (1);
+        }
+    }
+    return 0;
+}
+extern "C"
+int Java_be_umons_ibeatbox_main_NativeAudio_saveCurrentSound(JNIEnv* env, jclass clazz,jstring dbName,jstring soundName){
+ const char *databaseName = env->GetStringUTFChars(dbName, NULL);
+  const char *s_name = env->GetStringUTFChars(soundName, NULL);
+  const char *sql;
+   sqlite3 * db;
+   sqlite3_stmt * stmt;
+   int i;
+   CALL_SQLITE (open (databaseName, & db));
+    LOGI("DATABASE OPEN cpp native.\n");
+   stringstream ss;
+   ss <<s_name<<"',?)";
+   string str;
+   ss>>str;
+   string request = "INSERT INTO sound_data(id,data) VALUES ('";
+   request += str;
+   sql = request.c_str();
+    CALL_SQLITE (prepare_v2 (db, sql, strlen (sql) + 2, & stmt, NULL));
+    //CALL_SQLITE (bind_text (stmt, 1, "fruit", 6, SQLITE_STATIC));
+    //CALL_SQLITE_EXPECT (step (stmt), DONE);
+    CALL_SQLITE (bind_blob(stmt,1,recorderBuffer_TOTAL,sizeof(recorderBuffer_TOTAL), 
+    SQLITE_STATIC));
+    CALL_SQLITE_EXPECT (step (stmt), DONE);
+    sound_list[s_name] =recorderBuffer_TOTAL;
+    printf ("row id was %d\n", (int) sqlite3_last_insert_rowid (db));
+    LOGI("",(int) sqlite3_last_insert_rowid (db));
+    return 0;
+    
+}
